@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, HTTPException, Response, Request
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uuid
@@ -7,6 +7,7 @@ import base64
 
 app = FastAPI()
 
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,61 +16,105 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Assignment values
 TOTAL_ORDERS = 54
 RATE_LIMIT = 19
-WINDOW = 10
+WINDOW = 10  # seconds
 
-catalog = [{"id": i, "item": f"Order-{i}"} for i in range(1, TOTAL_ORDERS + 1)]
-idempotency = {}
-clients = {}
+# Fixed catalog of orders
+catalog = [
+    {
+        "id": i,
+        "item": f"Order-{i}"
+    }
+    for i in range(1, TOTAL_ORDERS + 1)
+]
+
+# Stores
+idempotency_store = {}
+rate_limit_store = {}
+
 
 class OrderCreate(BaseModel):
     item: str = "sample"
 
-def check_rate_limit(client_id: str, response: Response):
+
+def check_rate_limit(client_id: str):
     now = time.time()
-    timestamps = [t for t in clients.get(client_id, []) if now - t < WINDOW]
+
+    timestamps = rate_limit_store.get(client_id, [])
+
+    # Keep only requests in last 10 seconds
+    timestamps = [t for t in timestamps if now - t < WINDOW]
+
     if len(timestamps) >= RATE_LIMIT:
-        retry = WINDOW - (now - timestamps[0])
-        response.headers["Retry-After"] = str(int(retry) + 1)
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        retry_after = max(1, int(WINDOW - (now - timestamps[0])) + 1)
+
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded",
+            headers={
+                "Retry-After": str(retry_after)
+            },
+        )
+
     timestamps.append(now)
-    clients[client_id] = timestamps
+    rate_limit_store[client_id] = timestamps
+
+
+@app.get("/")
+def home():
+    return {"status": "ok"}
+
 
 @app.post("/orders", status_code=201)
 def create_order(
     order: OrderCreate,
-    response: Response,
-    request: Request,
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
     client_id: str = Header("default", alias="X-Client-Id"),
 ):
-    check_rate_limit(client_id, response)
-    if idempotency_key in idempotency:
-        return idempotency[idempotency_key]
-    created = {"id": str(uuid.uuid4()), "item": order.item}
-    idempotency[idempotency_key] = created
+    check_rate_limit(client_id)
+
+    # Same key -> return same order
+    if idempotency_key in idempotency_store:
+        return idempotency_store[idempotency_key]
+
+    created = {
+        "id": str(uuid.uuid4()),
+        "item": order.item,
+    }
+
+    idempotency_store[idempotency_key] = created
+
     return created
 
+
 @app.get("/orders")
-def list_orders(
-    response: Response,
-    request: Request,
+def get_orders(
     limit: int = 10,
     cursor: str | None = None,
     client_id: str = Header("default", alias="X-Client-Id"),
 ):
-    check_rate_limit(client_id, response)
+    check_rate_limit(client_id)
+
     start = 0
+
     if cursor:
-        start = int(base64.b64decode(cursor).decode())
+        try:
+            start = int(base64.b64decode(cursor.encode()).decode())
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid cursor")
+
     end = min(start + limit, TOTAL_ORDERS)
+
     items = catalog[start:end]
+
     next_cursor = None
+
     if end < TOTAL_ORDERS:
         next_cursor = base64.b64encode(str(end).encode()).decode()
-    return {"items": items, "next_cursor": next_cursor}
 
-@app.get("/")
-def root():
-    return {"status": "ok"}
+    return {
+        "items": items,
+        "next_cursor": next_cursor,
+    }
