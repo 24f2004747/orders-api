@@ -7,30 +7,21 @@ import base64
 
 app = FastAPI()
 
-# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Retry-After"],  # IMPORTANT
 )
 
-# Assignment values
 TOTAL_ORDERS = 54
 RATE_LIMIT = 19
-WINDOW = 10  # seconds
+WINDOW = 10
 
-# Fixed catalog of orders
-catalog = [
-    {
-        "id": i,
-        "item": f"Order-{i}"
-    }
-    for i in range(1, TOTAL_ORDERS + 1)
-]
+catalog = [{"id": i, "item": f"Order-{i}"} for i in range(1, TOTAL_ORDERS + 1)]
 
-# Stores
 idempotency_store = {}
 rate_limit_store = {}
 
@@ -44,18 +35,20 @@ def check_rate_limit(client_id: str):
 
     timestamps = rate_limit_store.get(client_id, [])
 
-    # Keep only requests in last 10 seconds
     timestamps = [t for t in timestamps if now - t < WINDOW]
 
     if len(timestamps) >= RATE_LIMIT:
-        retry_after = max(1, int(WINDOW - (now - timestamps[0])) + 1)
+        retry_after = max(
+            1,
+            int(WINDOW - (now - timestamps[0])) + 1
+        )
 
         raise HTTPException(
             status_code=429,
             detail="Rate limit exceeded",
             headers={
                 "Retry-After": str(retry_after)
-            },
+            }
         )
 
     timestamps.append(now)
@@ -63,7 +56,7 @@ def check_rate_limit(client_id: str):
 
 
 @app.get("/")
-def home():
+def root():
     return {"status": "ok"}
 
 
@@ -75,7 +68,6 @@ def create_order(
 ):
     check_rate_limit(client_id)
 
-    # Same key -> return same order
     if idempotency_key in idempotency_store:
         return idempotency_store[idempotency_key]
 
@@ -96,6 +88,9 @@ def get_orders(
     client_id: str = Header("default", alias="X-Client-Id"),
 ):
     check_rate_limit(client_id)
+
+    if limit < 1:
+        limit = 1
 
     start = 0
 
